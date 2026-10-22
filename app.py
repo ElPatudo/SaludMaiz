@@ -1,4 +1,3 @@
-import os
 import sys
 import io
 import shutil
@@ -19,11 +18,10 @@ from ultralytics import YOLO
 from ultralytics.nn import tasks
 
 # =====================================================================
-# 1. DEFINICIÓN Y REGISTRO DE MÓDULOS PERSONALIZADOS DE GAF-NET
+# 1. MÓDULOS PERSONALIZADOS DE GAF-NET (YOLOv8 + GSConv + FASFF)
 # =====================================================================
 
 class GSConv(nn.Module):
-    """Grouped Spatial Convolution del proyecto GAF-Net."""
     def __init__(self, c1, c2=None, k=3, s=1):
         super().__init__()
         if c2 is None:
@@ -48,7 +46,6 @@ class GSConv(nn.Module):
 
 
 class FASFF(nn.Module):
-    """Feature-Adaptive Spatial Feature Fusion del proyecto GAF-Net."""
     def __init__(self, c1, c2=256, level=0):
         super().__init__()
         if isinstance(c1, int):
@@ -190,7 +187,6 @@ def patched_parse_model(d, ch, verbose=True):
 
 
 def register_custom_modules():
-    """Registra GSConv y FASFF en Ultralytics y en __main__."""
     tasks.GSConv = GSConv
     tasks.FASFF = FASFF
 
@@ -219,7 +215,7 @@ def register_custom_modules():
 
 
 # =====================================================================
-# 2. DESCARGA Y CARGA DEL MODELO (best.pt)
+# 2. CREACIÓN AUTOMÁTICA DE CARPETA Y DESCARGA DE PESOS (best.pt)
 # =====================================================================
 
 WEIGHTS_URL = (
@@ -228,14 +224,9 @@ WEIGHTS_URL = (
     "raw/refs/heads/main/best.pt.zip"
 )
 
-# Rutas relativas compatibles con GitHub y servidores web
-BASE_DIR = pathlib.Path(__file__).parent.resolve()
-MODEL_DIR = BASE_DIR / "gafnet_maize"
-INPUT_DIR = BASE_DIR / "gafnet_inputs"
-OUTPUT_DIR = BASE_DIR / "gafnet_outputs"
-
-for folder in (MODEL_DIR, INPUT_DIR, OUTPUT_DIR):
-    folder.mkdir(parents=True, exist_ok=True)
+# Crea automáticamente la carpeta gafnet_maize sin que debas subirla a GitHub
+MODEL_DIR = pathlib.Path("gafnet_maize")
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 ZIP_PATH = MODEL_DIR / "best.pt.zip"
 BEST_PT = MODEL_DIR / "best.pt"
@@ -244,19 +235,18 @@ TRADUCCION_CLASES = {
     "blight": "Tizón foliar (blight)",
     "common_rust": "Roya común (common_rust)",
     "gray_spot": "Mancha gris (gray_spot)",
-    "health": "Hoja sana (health)",
+    "health": "Hoja aparentemente sana (health)",
 }
 
 COLORES_CLASES = {
-    "blight": (0, 140, 255),       # Naranja/Rojo en BGR
-    "common_rust": (0, 69, 255),   # Rojo fuerte en BGR
-    "gray_spot": (180, 105, 255),  # Magenta/Rosa en BGR
-    "health": (50, 205, 50),       # Verde en BGR
+    "blight": (0, 140, 255),
+    "common_rust": (0, 69, 255),
+    "gray_spot": (180, 105, 255),
+    "health": (50, 205, 50),
 }
 
 
 def looks_like_torch_checkpoint_zip(path):
-    """Verifica si el archivo ZIP es directamente un checkpoint serializado por PyTorch."""
     if not zipfile.is_zipfile(path):
         return False
     try:
@@ -270,7 +260,6 @@ def looks_like_torch_checkpoint_zip(path):
 
 
 def prepare_weights():
-    """Descarga y prepara best.pt si no existe localmente en gafnet_maize/."""
     if BEST_PT.exists() and BEST_PT.stat().st_size > 1_000_000:
         return BEST_PT
 
@@ -297,28 +286,25 @@ def prepare_weights():
                 largest = max(torch_candidates, key=lambda p: p.stat().st_size)
                 shutil.copy2(largest, BEST_PT)
             else:
-                raise FileNotFoundError("No se pudo identificar automáticamente el checkpoint best.pt.")
+                raise FileNotFoundError("No se pudo preparar el archivo best.pt.")
 
     return BEST_PT
 
 
-@st.cache_resource(show_spinner="Cargando modelo GAF-Net (YOLOv8)...")
+@st.cache_resource(show_spinner="Descargando y preparando el modelo GAF-Net automáticamente...")
 def load_gafnet_model():
     register_custom_modules()
     weights_path = prepare_weights()
-    model = YOLO(str(weights_path))
-    return model
+    return YOLO(str(weights_path))
 
 
 # =====================================================================
-# 3. FUNCIONES DE INFERENCIA Y DIBUJO DE CAJAS
+# 3. FUNCIÓN DE DETECCIÓN EN MEMORIA
 # =====================================================================
 
 def procesar_imagen(model, image_pil, filename, conf_thres, iou_thres, img_size):
-    """Ejecuta la detección sobre una imagen y devuelve la imagen anotada y la lista de detecciones."""
     register_custom_modules()
 
-    # Convertir PIL (RGB) a OpenCV (BGR)
     img_rgb = np.array(image_pil.convert("RGB"))
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
@@ -345,10 +331,8 @@ def procesar_imagen(model, image_pil, filename, conf_thres, iou_thres, img_size)
             nombre_es = TRADUCCION_CLASES.get(raw_name, raw_name)
             color = COLORES_CLASES.get(raw_name, (255, 165, 0))
 
-            # Dibujar rectángulo
             cv2.rectangle(annotated_bgr, (x1, y1), (x2, y2), color, 3)
 
-            # Dibujar etiqueta con fondo
             label = f"{raw_name} {conf:.2f}"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
             y_text = max(y1 - 8, th + 8)
@@ -373,10 +357,8 @@ def procesar_imagen(model, image_pil, filename, conf_thres, iou_thres, img_size)
             detecciones.append({
                 "Archivo": filename,
                 "Detección #": idx,
-                "Clase (ID)": cls_id,
                 "Código Clase": raw_name,
                 "Diagnóstico": nombre_es,
-                "Confianza": round(conf, 4),
                 "Confianza (%)": f"{conf * 100:.1f}%",
                 "x1": x1,
                 "y1": y1,
@@ -389,7 +371,7 @@ def procesar_imagen(model, image_pil, filename, conf_thres, iou_thres, img_size)
 
 
 # =====================================================================
-# 4. INTERFAZ DE USUARIO (STREAMLIT)
+# 4. INTERFAZ WEB CON ESPACIO DIRECTO DE CARGA
 # =====================================================================
 
 def main():
@@ -401,68 +383,63 @@ def main():
 
     st.title("🌽 GAF-Net: Detección de Enfermedades en Hojas de Maíz")
     st.markdown(
-        """
-        Aplicación basada en la arquitectura **GAF-Net (YOLOv8 + GSConv + FASFF)** utilizando el checkpoint público `best.pt`.
-        * **Clases detectadas:** `blight` (Tizón foliar), `common_rust` (Roya común), `gray_spot` (Mancha gris), `health` (Hoja aparentemente sana).
-        """
+        "Sube las fotografías directamente en el recuadro inferior para detectar: "
+        "**Tizón foliar (`blight`)**, **Roya común (`common_rust`)**, "
+        "**Mancha gris (`gray_spot`)** u **Hoja sana (`health`)**."
     )
 
-    # Barra lateral de parámetros
+    # Barra lateral de configuración
     st.sidebar.header("⚙️ Parámetros de Inferencia")
     conf_thres = st.sidebar.slider(
-        "Umbral de confianza (Confidence)",
+        "Umbral de confianza",
         min_value=0.05,
         max_value=0.95,
         value=0.25,
         step=0.05,
-        help="0.25 = sensible | 0.35 = intermedio | 0.50 = conservador"
+        help="0.25: sensible | 0.35: intermedio | 0.50: conservador"
     )
     iou_thres = st.sidebar.slider(
-        "Umbral IoU para NMS",
+        "Umbral IoU (NMS)",
         min_value=0.10,
         max_value=0.95,
         value=0.70,
         step=0.05
     )
     img_size = st.sidebar.selectbox(
-        "Tamaño de inferencia (imgsz)",
+        "Tamaño de imagen (imgsz)",
         options=[640, 960, 1280],
         index=0,
-        help="Para lesiones pequeñas se recomienda probar 960."
+        help="Usa 960 para detectar lesiones pequeñas con mayor precisión."
     )
 
-    # Cargar modelo
+    # Carga automática del modelo
     try:
         model = load_gafnet_model()
-        st.sidebar.success("✅ Modelo GAF-Net cargado correctamente")
+        st.sidebar.success("✅ Modelo cargado y listo")
     except Exception as e:
-        st.error(f"❌ Error al cargar el modelo: {e}")
+        st.error(f"❌ Error cargando el modelo: {e}")
         st.stop()
 
-    # Subida de imágenes
-    st.subheader("📤 1. Subir fotografías de hojas de maíz")
+    # ESPACIO PARA CARGAR LAS FOTOGRAFÍAS DIRECTAMENTE
+    st.subheader("📤 Cargar fotografías")
     uploaded_files = st.file_uploader(
-        "Selecciona una o varias imágenes (JPG, JPEG, PNG)",
+        "Arrastra tus fotos aquí o haz clic en 'Browse files' (puedes seleccionar varias a la vez)",
         type=["jpg", "jpeg", "png"],
         accept_multiple_files=True
     )
 
     if not uploaded_files:
-        st.info("👆 Sube una o más fotografías para ejecutar la detección.")
+        st.info("👆 Utiliza el recuadro de arriba para cargar una o varias fotografías de hojas de maíz.")
         return
 
     todas_las_detecciones = []
     imagenes_marcadas = {}
 
-    st.subheader("🔍 2. Resultados del Análisis")
+    st.subheader("🔍 Resultados del análisis")
 
     for uploaded_file in uploaded_files:
-        filename = pathlib.Path(uploaded_file.name).name
+        filename = uploaded_file.name
         image_pil = Image.open(uploaded_file)
-
-        # Guardar copia en gafnet_inputs
-        input_save_path = INPUT_DIR / filename
-        image_pil.convert("RGB").save(input_save_path)
 
         with st.spinner(f"Analizando {filename}..."):
             annotated_pil, detecciones = procesar_imagen(
@@ -474,59 +451,52 @@ def main():
                 img_size=img_size
             )
 
-        # Guardar imagen anotada en gafnet_outputs y en memoria para descarga
-        output_save_path = OUTPUT_DIR / f"marcada_{filename}"
-        annotated_pil.save(output_save_path)
-
+        # Guardar en memoria para descarga directa
         buf = io.BytesIO()
         annotated_pil.save(buf, format="PNG")
         imagenes_marcadas[f"marcada_{pathlib.Path(filename).stem}.png"] = buf.getvalue()
 
         todas_las_detecciones.extend(detecciones)
 
-        # Mostrar tarjeta por imagen
-        with st.expander(f"📸 Imagen: {filename} ({len(detecciones)} detecciones)", expanded=True):
+        with st.expander(f"📸 {filename} — {len(detecciones)} detección(es)", expanded=True):
             col1, col2 = st.columns(2)
             with col1:
-                st.image(image_pil, caption="Original", use_container_width=True)
+                st.image(image_pil, caption="Fotografía Original", use_container_width=True)
             with col2:
-                st.image(annotated_pil, caption="Detección GAF-Net", use_container_width=True)
+                st.image(annotated_pil, caption="Resultado con Cajas", use_container_width=True)
 
             if detecciones:
-                df_img = pd.DataFrame(detecciones)
-                st.dataframe(df_img, use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(detecciones), use_container_width=True, hide_index=True)
             else:
-                st.warning("Ninguna predicción superó el umbral de confianza actual en esta imagen.")
+                st.warning("Ninguna detección superó el umbral de confianza seleccionado.")
 
-    # Tabla consolidada y descargas
-    st.subheader("📊 3. Tabla Consolidada y Descargas")
+    # Tabla final y botones de descarga
+    st.subheader("📊 Resumen general y descargas")
 
     if todas_las_detecciones:
         df_total = pd.DataFrame(todas_las_detecciones)
         st.dataframe(df_total, use_container_width=True, hide_index=True)
-
-        csv_bytes = df_total.to_csv(index=False).encode("utf-8-sig")
     else:
         df_total = pd.DataFrame(columns=[
-            "Archivo", "Detección #", "Clase (ID)", "Código Clase",
-            "Diagnóstico", "Confianza", "Confianza (%)", "x1", "y1", "x2", "y2"
+            "Archivo", "Detección #", "Código Clase",
+            "Diagnóstico", "Confianza (%)", "x1", "y1", "x2", "y2"
         ])
-        st.info("No se registraron detecciones globales con el umbral seleccionado.")
-        csv_bytes = df_total.to_csv(index=False).encode("utf-8-sig")
+        st.info("No hubo detecciones que superaran el umbral en el lote cargado.")
 
-    # Crear archivo ZIP con todas las imágenes marcadas + el CSV
+    csv_bytes = df_total.to_csv(index=False).encode("utf-8-sig")
+
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for img_name, img_bytes in imagenes_marcadas.items():
             zf.writestr(img_name, img_bytes)
-        zf.writestr("reporte_detecciones_gafnet.csv", csv_bytes)
+        zf.writestr("reporte_detecciones_maiz.csv", csv_bytes)
 
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
         st.download_button(
-            label="📥 Descargar Tabla Detallada (CSV)",
+            label="📥 Descargar Tabla CSV",
             data=csv_bytes,
-            file_name="reporte_detecciones_gafnet.csv",
+            file_name="reporte_detecciones_maiz.csv",
             mime="text/csv",
             use_container_width=True
         )
